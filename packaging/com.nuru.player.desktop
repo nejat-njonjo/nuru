@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Nuru
+GenericName=Media Player
+Comment=Your media. Your world.
+Exec=nuru %F
+Icon=com.nuru.player
+Terminal=false
+Categories=AudioVideo;Audio;Video;Player;Qt;
+Keywords=music;video;player;media;playlist;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-wav;audio/mp4;audio/aac;audio/opus;video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;
+StartupWMClass=nuru
