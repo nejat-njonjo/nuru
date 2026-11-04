@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Nuru is a native Linux desktop media player: C++20, Qt 6 (≥ 6.5, developed on 6.10) / QML, LibVLC 3, SQLite via Qt SQL. `AGENT.md` is the product spec (features, palette, shortcuts, phases, Definition of Done); `tasks.md` tracks phased progress — update its checkboxes when you finish or verify something. Ground rules from AGENT.md:
+Nuru is a native Linux desktop media player: C++20, Qt 6 (≥ 6.5, developed on 6.10) / QML, LibVLC 3, SQLite via Qt SQL. `tasks.md` is the phased roadmap and status — update its checkboxes when you finish or verify something. Ground rules:
 
 - Finish the existing app incrementally; no rewrites or parallel implementations of existing features.
 - QML never talks to LibVLC; business logic and SQL stay in C++. Expensive work (scanning, metadata, thumbnails) stays off the GUI thread.

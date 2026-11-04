@@ -1,6 +1,6 @@
 # Nuru — Implementation Tasks
 
-Phased plan derived from [AGENT.md](AGENT.md) §23. Work through phases in order; keep the app
+Phased implementation plan. Work through phases in order; keep the app
 building after each one. Tick an item only once it is implemented **and** verified (built, run,
 or covered by a test that was actually executed).
 
@@ -20,7 +20,7 @@ a real display (mouse, keyboard, fullscreen, audible output) are still to be don
 - [x] `MediaLibrary` service + reusable `MediaListModel`
 - [x] Backend built as static library `nuru_core`, shared by app and tests
 - [x] `Main.qml` split into `Theme`/`AppState` singletons, `components/`, `pages/`, `dialogs/`
-- [x] Centralised design tokens (AGENT.md §6 palette) in `Theme.qml`
+- [x] Centralised design tokens (dark palette, accent #41C261) in `Theme.qml`
 - [x] Solar icon set (icones.js.org/collection/solar) bundled in `assets/icons/`, tinted at runtime
 - [x] Nuru app icon + `packaging/com.nuru.player.desktop`, install rules
 
@@ -38,7 +38,7 @@ a real display (mouse, keyboard, fullscreen, audible output) are still to be don
 - [x] Repeat off / all / one (tested)
 - [x] Shuffle with separate play order (tested)
 - [x] Queue side panel + "Up next" on Now Playing
-- [~] Keyboard shortcuts (AGENT.md §15 + seek, queue, settings) and shortcuts dialog —
+- [~] Keyboard shortcuts (playback, volume, seek, queue, fullscreen, search, settings) and shortcuts dialog —
       implemented; needs interactive check on a real display
 - [x] Missing / unplayable files: error toast, skipped in queues, not recorded as played (tested)
 - [~] Playback rate — engine API done and tested; no UI control yet

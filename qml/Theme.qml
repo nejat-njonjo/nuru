@@ -3,7 +3,7 @@ pragma Singleton
 import QtQuick
 import Nuru
 
-// Centralised design tokens (AGENT.md §6). Every colour, size and duration used by the UI
+// Centralised design tokens. Every colour, size and duration used by the UI
 // comes from here so the dark/light themes and accent colour stay consistent.
 QtObject {
     readonly property bool dark: AppSettings.theme !== "light"
