@@ -171,9 +171,14 @@ logo cache `~/.cache/Nuru/Nuru/network/`, settings `~/.config/Nuru/Nuru.conf`.
 
 ## Contributing
 
-See [tasks.md](tasks.md) for the phased roadmap and [AGENT.md](AGENT.md) for product
-requirements. Keep the build warning-free, run `ctest` before sending changes, and keep
+See [tasks.md](tasks.md) for the phased roadmap and current status. Keep the build warning-free, run `ctest` before sending changes, and keep
 business logic in C++ (QML is for presentation).
+
+## License
+
+Nuru's source code is released under the [MIT License](LICENSE). Third-party components keep
+their own licenses (below); the bundled Solar icons are CC BY 4.0, and LibVLC and Qt are used
+as dynamically linked LGPL libraries.
 
 ## Credits
 
