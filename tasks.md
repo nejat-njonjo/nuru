@@ -22,7 +22,7 @@ a real display (mouse, keyboard, fullscreen, audible output) are still to be don
 - [x] `Main.qml` split into `Theme`/`AppState` singletons, `components/`, `pages/`, `dialogs/`
 - [x] Centralised design tokens (dark palette, accent #41C261) in `Theme.qml`
 - [x] Solar icon set (icones.js.org/collection/solar) bundled in `assets/icons/`, tinted at runtime
-- [x] Nuru app icon + `packaging/com.nuru.player.desktop`, install rules
+- [x] Nuru app icon + `packaging/com.nuru.player.desktop.in`, install rules
 
 ## Phase 1 — Stabilise the foundation
 

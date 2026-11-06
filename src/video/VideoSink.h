@@ -32,6 +32,10 @@ public:
     double aspectRatio() const;          // display aspect ratio (accounts for non-square pixels)
     void setSampleAspect(unsigned num, unsigned den);
     void clear();                        // drop the current picture (media changed / stopped)
+    // Any thread: frames are ignored while not accepting. clear() stops accepting; the player
+    // thread re-enables it once the previous media has been torn down, so late frames from a
+    // replaced stream never reappear.
+    void setAccepting(bool accepting) { m_accepting = accepting; }
 
     // Render thread: copy of the most recent frame and its serial number.
     QImage latestFrame(quint64 *serial) const;
@@ -61,5 +65,6 @@ private:
     double m_sar = 1.0;
     std::atomic<quint64> m_serial{0};
     std::atomic<bool> m_notifyPending{false};
+    std::atomic<bool> m_accepting{true};
     bool m_hasFrame = false;   // GUI thread
 };

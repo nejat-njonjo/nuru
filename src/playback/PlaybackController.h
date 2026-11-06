@@ -6,12 +6,14 @@
 #include <QVariantMap>
 
 #include <atomic>
+#include <memory>
 
 #include "PlayQueue.h"
 
 struct libvlc_instance_t;
 struct libvlc_media_player_t;
 struct libvlc_event_t;
+struct libvlc_media_t;
 #include "video/VideoSink.h"
 
 // Owns the LibVLC engine and is the single entry point for playback.
@@ -19,6 +21,10 @@ struct libvlc_event_t;
 // LibVLC events arrive on LibVLC threads; they are marshalled to the GUI thread with queued
 // invocations. A load generation counter discards events that belong to media that has
 // already been replaced.
+//
+// Stopping or replacing media joins LibVLC's input thread, which can block for a long time on
+// network streams (a stalled HTTP read). Those transitions therefore run on a dedicated player
+// thread (PlayerWorker); the GUI thread never calls stop/set_media/play itself.
 class PlaybackController : public QObject
 {
     Q_OBJECT
@@ -146,6 +152,13 @@ private:
     bool playFirstSubitem();
     QString unavailableMessage() const;
     void startLoadingWatchdog();
+    struct PlayerWorker;
+    void postLoad(libvlc_media_t *media, bool autoplay, const QString &failMessage);
+    void postStop();
+    void postPlay(const QString &failMessage);
+    void reportCommandFailure(quint64 generation, const QString &message, bool skip);
+    // Audio settings only reach LibVLC while media is playing; they're re-applied on Playing.
+    bool audioActive() const { return m_player && (m_state == Playing || m_state == Paused); }
 
     libvlc_instance_t *m_vlc = nullptr;
     libvlc_media_player_t *m_player = nullptr;
@@ -168,7 +181,8 @@ private:
     bool m_hasVideoOutput = false; // LibVLC created a video output for the current media
     qint64 m_pendingStartMs = 0;   // resume position applied on the first play of a restored item
 
-    std::atomic<quint64> m_generation{0};
+    std::atomic<quint64> m_generation{0};   // generation the GUI wants (bumped per load/stop)
+    std::shared_ptr<PlayerWorker> m_worker; // owns the player thread; shared so it can outlive us
     std::atomic<qint64> m_pendingTime{-1};
     std::atomic<qint64> m_pendingLength{-1};
     std::atomic<double> m_pendingPosition{-1.0};

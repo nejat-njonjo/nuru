@@ -11,6 +11,11 @@
 #include <QTimer>
 #include <QUrl>
 
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <vlc/vlc.h>
@@ -26,7 +31,122 @@ constexpr libvlc_event_e WatchedEvents[] = {
 };
 constexpr qint64 RestartThresholdMs = 3000;
 constexpr int StreamLoadingTimeoutMs = 25000;
+// On exit, how long to wait for LibVLC to close a stream before leaving it to process teardown.
+constexpr auto ShutdownTimeout = std::chrono::seconds(3);
 } // namespace
+
+// The player thread. Runs the LibVLC calls that may block (stop, set_media, play) in order, so
+// the GUI never waits on a stream that is stuck in network I/O. A new load or stop supersedes
+// whatever is still queued (rapidly clicking through channels only opens the last one).
+struct PlaybackController::PlayerWorker
+{
+    struct Command
+    {
+        enum Kind { Load, Stop, Play } kind = Stop;
+        quint64 generation = 0;
+        libvlc_media_t *media = nullptr; // Load: owned reference (may be null to clear)
+        bool autoplay = false;
+        QString failMessage;
+    };
+
+    libvlc_media_player_t *player = nullptr;
+    VideoSink *sink = nullptr;
+    PlaybackController *owner = nullptr; // only touched while !quit, under mutex
+
+    // Generation of the media LibVLC is actually on. Events are tagged with it, so events the
+    // previous media emits while it is being stopped are discarded on the GUI thread.
+    std::atomic<quint64> playerGeneration{0};
+    std::atomic<quint64> requestedGeneration{0};
+
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::condition_variable finished;
+    std::deque<Command> commands;
+    bool quit = false;
+    bool done = false;
+    std::thread thread;
+
+    void dropPendingLocked()
+    {
+        for (const Command &pending : commands) {
+            if (pending.media)
+                libvlc_media_release(pending.media);
+        }
+        commands.clear();
+    }
+
+    void post(Command command)
+    {
+        std::lock_guard lock(mutex);
+        if (command.kind != Command::Play) {
+            dropPendingLocked();
+            requestedGeneration = command.generation;
+        }
+        commands.push_back(std::move(command));
+        wake.notify_one();
+    }
+
+    void run()
+    {
+        for (;;) {
+            Command command;
+            {
+                std::unique_lock lock(mutex);
+                wake.wait(lock, [this] { return quit || !commands.empty(); });
+                if (quit)
+                    break;
+                command = std::move(commands.front());
+                commands.pop_front();
+            }
+            execute(command);
+        }
+        libvlc_media_player_stop(player);
+        std::lock_guard lock(mutex);
+        done = true;
+        finished.notify_all();
+    }
+
+    void execute(Command &command)
+    {
+        bool ok = true;
+        switch (command.kind) {
+        case Command::Load:
+            libvlc_media_player_stop(player); // joins the old input thread: may block
+            playerGeneration = command.generation;
+            acceptFrames(command.generation);
+            libvlc_media_player_set_media(player, command.media);
+            if (command.media)
+                libvlc_media_release(command.media);
+            if (command.autoplay)
+                ok = libvlc_media_player_play(player) == 0;
+            break;
+        case Command::Stop:
+            libvlc_media_player_stop(player);
+            playerGeneration = command.generation;
+            break;
+        case Command::Play:
+            acceptFrames(command.generation);
+            ok = libvlc_media_player_play(player) == 0;
+            break;
+        }
+        if (ok)
+            return;
+        std::lock_guard lock(mutex);
+        if (quit)
+            return;
+        QMetaObject::invokeMethod(owner, [owner = owner, generation = command.generation,
+                                          message = command.failMessage, load = command.kind == Command::Load] {
+            owner->reportCommandFailure(generation, message, load);
+        }, Qt::QueuedConnection);
+    }
+
+    void acceptFrames(quint64 generation)
+    {
+        // Only if no newer load/stop has cleared the sink in the meantime.
+        if (generation == requestedGeneration.load())
+            sink->setAccepting(true);
+    }
+};
 
 QStringList PlaybackController::defaultArguments()
 {
@@ -64,6 +184,12 @@ PlaybackController::PlaybackController(const QStringList &vlcArguments, QObject 
         return;
     }
 
+    m_worker = std::make_shared<PlayerWorker>();
+    m_worker->player = m_player;
+    m_worker->sink = m_videoSink;
+    m_worker->owner = this;
+    m_worker->thread = std::thread([worker = m_worker] { worker->run(); });
+
     libvlc_event_manager_t *events = libvlc_media_player_event_manager(m_player);
     for (libvlc_event_e type : WatchedEvents)
         libvlc_event_attach(events, type, &PlaybackController::handleEvent, this);
@@ -76,11 +202,67 @@ PlaybackController::~PlaybackController()
         libvlc_event_manager_t *events = libvlc_media_player_event_manager(m_player);
         for (libvlc_event_e type : WatchedEvents)
             libvlc_event_detach(events, type, &PlaybackController::handleEvent, this);
-        libvlc_media_player_stop(m_player);
+
+        std::unique_lock lock(m_worker->mutex);
+        m_worker->dropPendingLocked();
+        m_worker->quit = true;
+        m_worker->owner = nullptr;
+        m_worker->wake.notify_one();
+        if (!m_worker->finished.wait_for(lock, ShutdownTimeout, [this] { return m_worker->done; })) {
+            // LibVLC is still stuck closing a stream. Don't hang the exit on it: leave the
+            // player, the engine and the video sink (its frame callbacks may still run) to
+            // process teardown.
+            qCWarning(lcPlayback) << "LibVLC did not stop in time; skipping engine shutdown";
+            m_worker->thread.detach();
+            m_videoSink->setParent(nullptr);
+            return;
+        }
+        lock.unlock();
+        m_worker->thread.join();
         libvlc_media_player_release(m_player);
     }
     if (m_vlc)
         libvlc_release(m_vlc);
+}
+
+void PlaybackController::postLoad(libvlc_media_t *media, bool autoplay, const QString &failMessage)
+{
+    PlayerWorker::Command command;
+    command.kind = PlayerWorker::Command::Load;
+    command.generation = m_generation.load();
+    command.media = media;
+    command.autoplay = autoplay;
+    command.failMessage = failMessage;
+    m_worker->post(std::move(command));
+}
+
+void PlaybackController::postStop()
+{
+    PlayerWorker::Command command;
+    command.kind = PlayerWorker::Command::Stop;
+    command.generation = m_generation.load();
+    m_worker->post(std::move(command));
+}
+
+void PlaybackController::postPlay(const QString &failMessage)
+{
+    PlayerWorker::Command command;
+    command.kind = PlayerWorker::Command::Play;
+    command.generation = m_generation.load();
+    command.failMessage = failMessage;
+    m_worker->post(std::move(command));
+}
+
+void PlaybackController::reportCommandFailure(quint64 generation, const QString &message, bool skip)
+{
+    if (generation != m_generation.load())
+        return;
+    setState(Error, message);
+    emit errorOccurred(m_error);
+    if (skip) {
+        ++m_consecutiveFailures;
+        advance(true);
+    }
 }
 
 QString PlaybackController::engineVersion() const
@@ -104,7 +286,7 @@ void PlaybackController::handleEvent(const libvlc_event_t *event, void *opaque)
 {
     // Runs on a LibVLC thread: never call back into LibVLC here, only hand values over.
     auto *self = static_cast<PlaybackController *>(opaque);
-    const quint64 generation = self->m_generation.load();
+    const quint64 generation = self->m_worker->playerGeneration.load();
     qint64 value = 0;
     double fvalue = 0.0;
 
@@ -350,7 +532,6 @@ bool PlaybackController::loadIndex(int index, bool autoplay, qint64 startMs)
         return false;
 
     m_queue->setCurrentIndex(index);
-    libvlc_media_player_stop(m_player); // synchronous; its events carry the old generation
     m_videoSink->clear();
 
     m_entry = entry;
@@ -365,7 +546,7 @@ bool PlaybackController::loadIndex(int index, bool autoplay, qint64 startMs)
 
     const bool network = SavedStreams::isNetworkLocation(m_path);
     if (!network && !QFileInfo(m_path).isFile()) {
-        libvlc_media_player_set_media(m_player, nullptr);
+        postLoad(nullptr, false, {});
         emit currentMediaChanged();
         setState(Error, QStringLiteral("“%1” could not be found. It may have been moved or deleted.").arg(entry.title));
         emit errorOccurred(m_error);
@@ -383,6 +564,7 @@ bool PlaybackController::loadIndex(int index, bool autoplay, qint64 startMs)
         media = libvlc_media_new_path(m_vlc, QFile::encodeName(m_path).constData());
     }
     if (!media) {
+        postLoad(nullptr, false, {});
         emit currentMediaChanged();
         setState(Error, QStringLiteral("“%1” could not be opened").arg(entry.title));
         emit errorOccurred(m_error);
@@ -396,8 +578,8 @@ bool PlaybackController::loadIndex(int index, bool autoplay, qint64 startMs)
             m_position = double(startMs) / double(m_duration);
         emit timelineChanged();
     }
-    libvlc_media_player_set_media(m_player, media);
-    libvlc_media_release(media);
+    // Stopping the previous media and starting this one happens on the player thread.
+    postLoad(media, autoplay, QStringLiteral("Playback of “%1” could not be started").arg(entry.title));
     emit currentMediaChanged();
 
     if (!autoplay) {
@@ -405,11 +587,6 @@ bool PlaybackController::loadIndex(int index, bool autoplay, qint64 startMs)
         return true;
     }
     setState(Loading);
-    if (libvlc_media_player_play(m_player) != 0) {
-        setState(Error, QStringLiteral("Playback of “%1” could not be started").arg(entry.title));
-        emit errorOccurred(m_error);
-        return false;
-    }
     if (network)
         startLoadingWatchdog();
     return true;
@@ -423,7 +600,7 @@ void PlaybackController::startLoadingWatchdog()
         if (generation != m_generation.load() || m_state != Loading || m_reachedPlaying)
             return;
         ++m_generation;
-        libvlc_media_player_stop(m_player);
+        postStop();
         setState(Error, QStringLiteral("“%1” isn't responding. The stream may be offline.").arg(m_entry.title));
         emit errorOccurred(m_error);
     });
@@ -467,11 +644,9 @@ bool PlaybackController::playFirstSubitem()
     }
     ++m_generation;
     m_reachedPlaying = false;
-    libvlc_media_player_set_media(m_player, child);
-    libvlc_media_release(child);
+    m_videoSink->clear();
+    postLoad(child, true, unavailableMessage()); // takes the child reference
     setState(Loading);
-    if (libvlc_media_player_play(m_player) != 0)
-        return false;
     startLoadingWatchdog();
     return true;
 }
@@ -575,10 +750,7 @@ void PlaybackController::play()
         m_playRecorded = false;
     }
     setState(Loading);
-    if (libvlc_media_player_play(m_player) != 0) {
-        setState(Error, QStringLiteral("Playback could not be started"));
-        emit errorOccurred(m_error);
-    }
+    postPlay(QStringLiteral("Playback could not be started"));
 }
 
 void PlaybackController::pause()
@@ -600,8 +772,9 @@ void PlaybackController::stop()
     if (!m_player || !hasMedia())
         return;
     ++m_generation; // drop events emitted by the stop itself
-    libvlc_media_player_stop(m_player);
     m_videoSink->clear();
+    postStop();
+    setSeekable(false);
     m_time = 0;
     m_position = 0.0;
     emit timelineChanged();
@@ -661,7 +834,7 @@ void PlaybackController::setVolume(int volume)
     if (bounded == m_volume)
         return;
     m_volume = bounded;
-    if (m_player)
+    if (audioActive())
         libvlc_audio_set_volume(m_player, m_volume);
     emit volumeChanged();
 }
@@ -676,7 +849,7 @@ void PlaybackController::setMuted(bool muted)
     if (m_muted == muted)
         return;
     m_muted = muted;
-    if (m_player) {
+    if (audioActive()) {
         libvlc_audio_set_mute(m_player, muted ? 1 : 0);
         // Unmuting restores the remembered level (VLC may reset it on some outputs).
         if (!muted)
@@ -701,7 +874,7 @@ void PlaybackController::setRate(double rate)
     if (qFuzzyCompare(bounded, m_rate))
         return;
     m_rate = bounded;
-    if (m_player)
+    if (audioActive())
         libvlc_media_player_set_rate(m_player, float(m_rate));
     emit rateChanged();
 }

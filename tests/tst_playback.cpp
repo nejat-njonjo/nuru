@@ -37,6 +37,7 @@ private slots:
     void followsPlaylistLinks();
     void unreachableStreamReportsError();
     void rejectsUnplayableLocations();
+    void switchingAwayFromStalledStreamDoesNotBlock();
 };
 
 void TestPlayback::initTestCase()
@@ -248,6 +249,36 @@ void TestPlayback::rejectsUnplayableLocations()
     QVERIFY(!playback.openLocation(QStringLiteral("javascript:alert(1)")));
     QVERIFY(!playback.openLocation(QString()));
     QVERIFY(!playback.hasMedia());
+}
+
+void TestPlayback::switchingAwayFromStalledStreamDoesNotBlock()
+{
+    // Switching away from a stream whose server hung must return immediately and play the new
+    // item: stop/set_media run on the player thread. (LibVLC's own HTTP/HLS reads are
+    // interruptible, so this doesn't reproduce real-world stalls in DNS/TLS on remote hosts; it
+    // guards the asynchronous switch itself.)
+    LocalHttpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    QFile wav(m_long);
+    QVERIFY(wav.open(QIODevice::ReadOnly));
+    server.stall("/hung.wav", "audio/wav", wav.read(64 * 1024));
+    server.stall("/hung.ts", "video/mp2t", wav.read(64 * 1024));
+    server.route("/hung.m3u8", "application/vnd.apple.mpegurl",
+                 "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n"
+                 "#EXTINF:10.0,\n" + server.url("/hung.ts").toUtf8() + "\n");
+
+    for (const QString &stream : {server.url("/hung.wav"), server.url("/hung.m3u8")}) {
+        PlaybackController playback(args());
+        QVERIFY(playback.openLocation(stream));
+        QTest::qWait(2500); // let LibVLC open it and block on the stalled body
+
+        QElapsedTimer timer;
+        timer.start();
+        playback.playPaths({m_long});
+        QVERIFY2(timer.elapsed() < 500, qPrintable(QStringLiteral("switching blocked for %1 ms").arg(timer.elapsed())));
+        QCOMPARE(playback.currentPath(), m_long);
+        QTRY_COMPARE_WITH_TIMEOUT(playback.state(), PlaybackController::Playing, 10000);
+    }
 }
 
 QTEST_MAIN(TestPlayback)

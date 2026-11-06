@@ -51,6 +51,7 @@ void VideoSink::setSampleAspect(unsigned num, unsigned den)
 
 void VideoSink::clear()
 {
+    m_accepting = false;
     {
         QMutexLocker lock(&m_mutex);
         m_frontValid = false;
@@ -135,6 +136,8 @@ void VideoSink::unlockCallback(void *, void *, void *const *)
 void VideoSink::displayCallback(void *opaque, void *)
 {
     auto *self = static_cast<VideoSink *>(opaque);
+    if (!self->m_accepting)
+        return; // frame of media that is being replaced
     {
         QMutexLocker lock(&self->m_mutex);
         std::swap(self->m_front, self->m_back);

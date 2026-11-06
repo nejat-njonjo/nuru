@@ -136,7 +136,9 @@ set_target_properties(nuru PROPERTIES
 # Install (Linux desktop integration)
 # ---------------------------------------------------------------------------
 install(TARGETS nuru RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} BUNDLE DESTINATION .)
-install(FILES packaging/com.nuru.player.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+# Absolute Exec path: launchers don't always have ~/.local/bin (a user prefix) on PATH.
+configure_file(packaging/com.nuru.player.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/com.nuru.player.desktop @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/com.nuru.player.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES assets/icons/app/com.nuru.player.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 
